@@ -148,9 +148,20 @@ def _save_session(session: dict) -> None:
     """
     Persist the completed session to profile.json.
 
-    Only serialisable fields are written; wardrobe and style_profile are
-    omitted because they are loaded from their own files at startup.
+    Writes all serialisable fields including style_profile so that
+    _load_profile() can reconstruct preferences on the next run.
     """
+    # Build a style_profile from the selected item if one wasn't passed in.
+    item = session.get("selected_item") or {}
+    derived_profile = {
+        "preferred_colors": item.get("colors", []),
+        "style_tags":       item.get("style_tags", []),
+        "avoided_categories": [],
+    }
+    # Merge: keep any explicit style_profile the caller provided; fill gaps
+    # from the item the user actually chose this session.
+    saved_profile = {**derived_profile, **session.get("style_profile", {})}
+
     record = {
         "query":             session["query"],
         "parsed":            session["parsed"],
@@ -161,6 +172,7 @@ def _save_session(session: dict) -> None:
         "outfit_complete":   session["outfit_complete"],
         "fit_card":          session["fit_card"],
         "fit_card_fallback": session["fit_card_fallback"],
+        "style_profile":     saved_profile,   # ← persisted for next session
     }
 
     existing: list = []
@@ -172,6 +184,39 @@ def _save_session(session: dict) -> None:
 
     existing.append(record)
     PROFILE_PATH.write_text(json.dumps(existing, indent=2))
+
+
+def _load_profile() -> dict | None:
+    """
+    Load the most recent session's style_profile from profile.json.
+
+    Returns None if no profile file exists yet, or if the file is empty
+    or corrupt. The caller (run_agent / handle_query) passes the result
+    in as style_profile so score_listing can use saved preferences without
+    the user re-entering anything.
+    """
+    if not PROFILE_PATH.exists():
+        return None
+    try:
+        existing = json.loads(PROFILE_PATH.read_text())
+        if not existing:
+            return None
+        last = existing[-1]
+        profile = last.get("style_profile")
+        if profile:
+            return profile
+        # Fallback: reconstruct from selected_item if style_profile key missing
+        # (handles sessions saved before this field was added).
+        item = last.get("selected_item") or {}
+        if item:
+            return {
+                "preferred_colors":   item.get("colors", []),
+                "style_tags":         item.get("style_tags", []),
+                "avoided_categories": [],
+            }
+        return None
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 # ── planning loop ──────────────────────────────────────────────────────────────
@@ -190,7 +235,9 @@ def run_agent(
     Args:
         query:               Natural language user request.
         wardrobe:            User's wardrobe dict.
-        style_profile:       Optional persisted style profile dict.
+        style_profile:       Optional persisted style profile dict. When passed
+                             in from _load_profile(), score_listing will use
+                             saved color and style preferences automatically.
         knows_what_they_want: Pass False to route through explain_style_gap
                              first (the "No" branch in the flowchart).
         save_session:        Write the completed session to profile.json when
@@ -220,6 +267,10 @@ def run_agent(
     """
     # ── initialize ─────────────────────────────────────────────────────────────
     session = _new_session(query, wardrobe, style_profile)
+
+    # ── log if a saved style profile was loaded ────────────────────────────────
+    if style_profile:
+        print(f"[FitFindr] Loaded style profile from previous session: {style_profile}")
 
     # ── parse query ────────────────────────────────────────────────────────────
     session["parsed"] = _parse_query(query)
@@ -317,13 +368,22 @@ def run_agent(
         return session
 
     # ── suggest_outfit ─────────────────────────────────────────────────────────
+    item_going_into_suggest = session["selected_item"]
+    print(f"[DEBUG] session['selected_item'] before suggest_outfit:\n{item_going_into_suggest}\n")
+
     outfits = suggest_outfit(
-        new_item=session["selected_item"],
+        new_item=item_going_into_suggest,
         wardrobe=session["wardrobe"],
     )
     # suggest_outfit returns a plain string, not a list — store directly.
     outfit_string = outfits if isinstance(outfits, str) else ""
     session["outfits"] = [outfit_string] if outfit_string else []
+
+    # Verify suggest_outfit received exactly what was in session, not a copy.
+    assert session["selected_item"] is item_going_into_suggest, (
+        "STATE BUG: selected_item was replaced between storage and suggest_outfit call"
+    )
+    print(f"[DEBUG] session['outfits'][0] (outfit_string):\n{outfit_string}\n")
 
     # suggest_outfit returns a single string. "Complete" means non-empty;
     # there is no structured missing_categories field to inspect.
@@ -331,6 +391,14 @@ def run_agent(
 
     # ── create_fit_card ────────────────────────────────────────────────────────
     outfit_str = session["outfits"][0] if session["outfits"] else ""
+
+    # Verify create_fit_card receives exactly the string stored in session.
+    assert outfit_str == outfit_string, (
+        f"STATE BUG: outfit string diverged before create_fit_card\n"
+        f"  session['outfits'][0]: {outfit_str!r}\n"
+        f"  outfit_string:         {outfit_string!r}"
+    )
+    print(f"[DEBUG] outfit_str going into create_fit_card:\n{outfit_str}\n")
 
     try:
         fit_card = create_fit_card(
@@ -353,6 +421,7 @@ def run_agent(
         )
         session["fit_card_fallback"] = True
         print("[FitFindr] Warning: fit card generated from template (LLM call failed).")
+
     # ── save session ───────────────────────────────────────────────────────────
     # In a fully interactive loop, the agent would ask "search again or refine?"
     # (diagram node P) before saving. In batch/API mode we save unconditionally
@@ -395,7 +464,23 @@ if __name__ == "__main__":
         wardrobe=get_example_wardrobe(),
         save_session=False,
     )
-    print(f"Error: {session2['error']}")
+    # Branch assertions: the agent must have stopped before suggest_outfit.
+    assert session2["error"] is not None, (
+        "FAIL: session['error'] is None — expected an error message"
+    )
+    assert session2["fit_card"] is None, (
+        "FAIL: session['fit_card'] is not None — create_fit_card was called when it shouldn't have been"
+    )
+    assert session2["outfits"] == [], (
+        f"FAIL: session['outfits'] is {session2['outfits']!r} — suggest_outfit ran on empty results"
+    )
+    assert session2["selected_item"] is None, (
+        "FAIL: session['selected_item'] is set — search must have returned results unexpectedly"
+    )
+    print(f"PASS  error:         {session2['error']}")
+    print(f"PASS  fit_card:      {session2['fit_card']!r}")
+    print(f"PASS  outfits:       {session2['outfits']!r}")
+    print(f"PASS  selected_item: {session2['selected_item']!r}")
 
     print("\n\n=== Style gap path (user unsure) ===\n")
     session3 = run_agent(
@@ -409,3 +494,27 @@ if __name__ == "__main__":
     else:
         print(f"Suggested search used: {session3['parsed']['description']}")
         print(f"Found: {session3['selected_item']['title']}")
+
+    print("\n\n=== Style profile memory test ===\n")
+    # Run 1: save a session so profile.json is written
+    print("--- Run 1: saving session to profile.json ---")
+    run_agent(
+        query="looking for a vintage graphic tee under $30",
+        wardrobe=get_example_wardrobe(),
+        save_session=True,
+    )
+    # Run 2: load profile and confirm style_profile is printed
+    print("\n--- Run 2: loading saved profile ---")
+    loaded = _load_profile()
+    print(f"Loaded style profile: {loaded}")
+    session4 = run_agent(
+        query="90s track jacket",
+        wardrobe=get_example_wardrobe(),
+        style_profile=loaded,
+        save_session=False,
+    )
+    if session4["error"]:
+        print(f"Error: {session4['error']}")
+    else:
+        print(f"Found:   {session4['selected_item']['title']}")
+        print(f"Profile used in scoring: {session4['style_profile']}")
