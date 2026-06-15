@@ -23,28 +23,57 @@ from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     """
     Called by Gradio when the user submits a query.
-
+ 
     Args:
-        user_query:     The text the user typed into the search box.
+        user_query:      The text the user typed into the search box.
         wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
-
+ 
     Returns:
         A tuple of three strings:
             (listing_text, outfit_suggestion, fit_card)
         Each string maps to one of the three output panels in the UI.
-
-    TODO:
-        1. Guard against an empty query (return early with an error message).
-        2. Select the wardrobe based on wardrobe_choice.
-        3. Call run_agent() with the query and selected wardrobe.
-        4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
-        5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    # 1. Guard against an empty query.
+    if not user_query or not user_query.strip():
+        return "Please enter a search query.", "", ""
+ 
+    # 2. Select wardrobe based on the dropdown choice.
+    if wardrobe_choice == "Example wardrobe":
+        wardrobe = get_example_wardrobe()
+    else:
+        wardrobe = get_empty_wardrobe()
+ 
+    # 3. Run the agent.
+    session = run_agent(query=user_query, wardrobe=wardrobe, save_session=False)
+ 
+    # 4. Surface any error in the first panel; leave the other two blank.
+    if session["error"]:
+        return session["error"], "", ""
+ 
+    # 5. Format the selected item into a readable listing_text string.
+    item = session["selected_item"]
+    score_result = session.get("score_result") or {}
+    price_verdict = session.get("price_verdict") or {}
+ 
+    listing_text = (
+        f"{item['title']}\n"
+        f"{'─' * 40}\n"
+        f"Price:     ${item['price']}  ({price_verdict.get('verdict', 'n/a')})\n"
+        f"Platform:  {item['platform']}\n"
+        f"Condition: {item['condition']}\n"
+        f"Size:      {item['size']}\n"
+        f"Style:     {', '.join(item.get('style_tags', []))}\n"
+        f"Colors:    {', '.join(item.get('colors', []))}\n"
+        f"{'─' * 40}\n"
+        f"Score: {score_result.get('score', '—')}/10  "
+        f"({score_result.get('verdict', '—')})\n"
+        + "\n".join("• " + r for r in score_result.get("reasons", []))
+    )
+ 
+    outfit_suggestion = session["outfits"][0] if session["outfits"] else ""
+ 
+    return listing_text, outfit_suggestion, session["fit_card"]
+
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
