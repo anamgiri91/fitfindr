@@ -120,6 +120,25 @@ If fewer than 2 comparable items are found, the tool returns a "not enough data"
 Planning loop role:
 Runs alongside score_listing immediately after search_listings — both take the found item as input. The verdict feeds into score_listing as a pricing signal, so a "great deal" can boost the buy score and "overpriced" can lower it, making the two tools work together rather than independently.
 
+Tool 6: explain_style_gap
+
+**What it does:**
+Analyzes the user's current wardrobe and identifies what's missing — by category count, versatility tags, and color variety. Produces a ready-made search query the agent can pass directly into search_listings when the user doesn't know what they're looking for.
+
+**Input parameters:**
+- `wardrobe` (dict): The user's current wardrobe with an `items` key; handles empty wardrobes without crashing
+
+**What it returns:**
+A dict with:
+- `gaps` (list of str): plain-English descriptions of what's missing or underrepresented (e.g. "No outerwear listed — this is a key missing category")
+- `category_counts` (dict): maps each expected category to how many items the user currently owns
+- `suggested_search` (str): a ready-made description string to pass directly into search_listings (e.g. "versatile outerwear")
+
+**What happens if it fails or returns nothing:**
+If the wardrobe is empty, the tool returns a default starter gap list with sensible recommendations rather than crashing. The agent uses `suggested_search` from the result to begin the search flow without needing any input from the user.
+
+**Planning loop role:**
+Only called when `knows_what_they_want=False` — the "No" branch in the architecture diagram. Its `suggested_search` output replaces the description in the parsed query before search_listings is called, so the agent can still run a full interaction even when the user has no specific item in mind.
 ---
 
 ## Planning Loop
