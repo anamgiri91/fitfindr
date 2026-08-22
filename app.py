@@ -12,6 +12,8 @@ Then open the localhost URL shown in your terminal (usually http://localhost:786
 but check your terminal — the port may differ).
 """
 
+import os
+
 import gradio as gr
 
 from agent import run_agent
@@ -149,4 +151,9 @@ Describe what you're looking for — include size and price if you want to filte
 
 if __name__ == "__main__":
     demo = build_interface()
-    demo.launch()
+    # Render (and most PaaS hosts) inject the port to bind to via $PORT and
+    # expect the process to listen on 0.0.0.0. Falls back to 7860 for local dev.
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", 7860)),
+    )
