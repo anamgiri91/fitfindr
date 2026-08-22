@@ -144,7 +144,7 @@ note if anything is missing to complete the look."""
 
     # Step 4 — call LLM and return response
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -194,7 +194,7 @@ Only return the caption text, nothing else."""
     # Step 3 — call LLM with higher temperature for variety
     client = Groq()
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
         temperature=1.2
     )
