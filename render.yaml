@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: fitfindr
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.12.3
+    autoDeploy: true

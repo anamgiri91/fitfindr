@@ -1,16 +1,123 @@
-# FitFindr
+# FitFindr 🛍️
 
-An AI-powered thrift shopping agent that takes a natural language query, finds matching secondhand listings, scores the buy decision, suggests complete outfits, and generates a shareable fit card — all in a single interaction.
+**An AI shopping agent that turns a plain-English request into a scored, styled, ready-to-post thrift find.**
+
+Type something like *"vintage graphic tee under $30"* and FitFindr searches a secondhand listings dataset, checks whether the price is actually fair against comparable items, scores the buy against your existing wardrobe, builds a complete outfit around it, and writes a shareable outfit caption — all through one conditional tool-calling loop, no manual re-entry of data between steps.
+
+[**Live demo →**](#) &nbsp;·&nbsp; Built with Python, Gradio, and Groq (LPU inference)
 
 ---
 
-## Tool Inventory
+## Why this project
+
+Most "chatbot wrapper" projects call an LLM once and print the response. FitFindr is an actual **agent**: it plans a sequence of tool calls, branches on what each tool returns, carries state forward so nothing is ever re-asked of the user, and degrades gracefully — every tool has a defined failure mode with no unhandled exceptions anywhere in the loop. That planning/state/error-handling discipline is documented in full in the [Technical Deep Dive](#technical-deep-dive) below.
+
+## What it does
+
+| Step | Tool | What happens |
+|---|---|---|
+| 1 | `explain_style_gap` *(optional)* | If the user doesn't know what they want, analyze their wardrobe for gaps and generate a search query for them |
+| 2 | `search_listings` | Rank a 40-item mock listings dataset by keyword, size, and price fit |
+| 3 | `estimate_price_fairness` | Compare the top result against real comparables in the dataset — "great deal," "fair price," or "overpriced" |
+| 4 | `score_listing` | Score the item 0–10 against the user's wardrobe and style preferences, with a plain-English "strong buy / maybe / pass" verdict |
+| 5 | `suggest_outfit` | Build 1–2 complete outfits pairing the new item with existing wardrobe pieces |
+| 6 | `create_fit_card` | Generate a casual, Instagram-ready caption for the finished look |
+
+A `"pass"` verdict sends the agent back to search automatically (up to 3 retries) instead of pushing a bad purchase forward through the rest of the pipeline.
+
+## Tech stack
+
+- **Python** — core agent logic, regex-based query parsing, planning loop
+- **Groq API** (`openai/gpt-oss-120b`) — LPU-accelerated inference for outfit suggestions and caption generation
+- **Gradio** — web UI
+- **Pytest** — test suite for tool-level and agent-level behavior
+- **Render** — deployment
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A([User query]) --> B{Knows what they want?}
+    B -- No --> C[explain_style_gap] --> E[search_listings]
+    B -- Yes --> E
+    E -- no results --> F[Explain why, ask to adjust] --> E
+    E -- results --> G[selected_item saved to session]
+    G --> H[estimate_price_fairness]
+    G --> I[score_listing]
+    H -- price verdict --> I
+    I -- pass --> J[Surface reasons, retry] --> E
+    I -- strong buy / maybe --> K[suggest_outfit]
+    K --> M[create_fit_card]
+    M -- LLM fails --> N[Templated fallback caption]
+    M -- success --> O([Fit card shown to user])
+    N --> O
+```
+
+Full state-flow, per-tool failure modes, and a step-by-step walkthrough of a real query are in the [Technical Deep Dive](#technical-deep-dive).
+
+## Running locally
+
+```bash
+git clone https://github.com/anamgiri91/fitfindr.git
+cd fitfindr
+pip install -r requirements.txt
+cp .env.example .env        # then add your Groq API key
+python app.py
+```
+
+Open the localhost URL Gradio prints (usually `http://localhost:7860`).
+
+Get a free Groq API key at [console.groq.com](https://console.groq.com).
+
+## Deploying on Render
+
+This repo includes a `render.yaml` blueprint, so deployment is a couple of clicks:
+
+1. Push this repo to your own GitHub account.
+2. In Render, choose **New → Blueprint** and point it at the repo. Render reads `render.yaml` and provisions the web service automatically.
+3. When prompted, set the `GROQ_API_KEY` environment variable to your own key (marked `sync: false` in the blueprint so it's never committed).
+4. Deploy. Render builds with `pip install -r requirements.txt` and starts the app with `python app.py`, which binds to `0.0.0.0` on Render's injected `$PORT`.
+
+No Blueprint access? Create the web service manually with the same build/start commands and add `GROQ_API_KEY` under the service's **Environment** tab.
+
+## Testing
+
+```bash
+pytest tests.py -v
+```
+
+Covers filtering edge cases in `search_listings` (size-exhausted, price-exhausted, no keyword overlap), empty-wardrobe behavior in `suggest_outfit` and `score_listing`, the templated fallback path in `create_fit_card`, and the "not enough data" branch in `estimate_price_fairness`.
+
+## Project structure
+
+```
+fitfindr/
+├── app.py                 # Gradio UI + query handler
+├── agent.py                # Planning loop, session state, query parsing
+├── tools.py                 # The 6 tools (search, price, score, outfit, caption, gap analysis)
+├── utils/data_loader.py    # Listings + wardrobe schema loaders
+├── data/
+│   ├── listings.json        # Mock secondhand listings dataset
+│   └── wardrobe_schema.json
+├── tests.py
+├── render.yaml              # Render deployment blueprint
+└── planning.md              # Original design spec (tool contracts, error table, AI-assisted build log)
+```
+
+---
+
+## Technical Deep Dive
+
+<details>
+<summary><strong>Full tool inventory, planning loop, state management, error handling table, and a step-by-step example run</strong></summary>
+
+### Tool Inventory
 
 FitFindr uses six tools. All three required tools plus three supporting tools are wired through a single planning loop.
 
 ---
 
-### `search_listings(description, size, max_price)`
+#### `search_listings(description, size, max_price)`
 
 **Purpose:** Searches `data/listings.json` for items matching the user's query. Filters by size and price ceiling, then ranks remaining items by keyword overlap with the description.
 
@@ -23,7 +130,7 @@ FitFindr uses six tools. All three required tools plus three supporting tools ar
 
 ---
 
-### `suggest_outfit(new_item, wardrobe)`
+#### `suggest_outfit(new_item, wardrobe)`
 
 **Purpose:** Given the item the user is considering and their existing wardrobe, generates 1–2 complete outfit combinations by matching style tags and complementary colors. Falls back to general styling advice when the wardrobe is empty.
 
@@ -35,7 +142,7 @@ FitFindr uses six tools. All three required tools plus three supporting tools ar
 
 ---
 
-### `create_fit_card(outfit, new_item)`
+#### `create_fit_card(outfit, new_item)`
 
 **Purpose:** Takes the outfit suggestion string and the listing dict and generates a 2–4 sentence Instagram/TikTok-style caption that sounds like a real person posting an OOTD — not a product listing.
 
@@ -47,7 +154,7 @@ FitFindr uses six tools. All three required tools plus three supporting tools ar
 
 ---
 
-### `score_listing(item, wardrobe, style_profile)`
+#### `score_listing(item, wardrobe, style_profile)`
 
 **Purpose:** Scores a listing 0–10 based on how much value it adds to the wardrobe. Evaluates style tag overlap, category redundancy, item condition, and style profile preferences to give a buy confidence verdict.
 
@@ -64,7 +171,7 @@ FitFindr uses six tools. All three required tools plus three supporting tools ar
 
 ---
 
-### `estimate_price_fairness(item, condition_weight)`
+#### `estimate_price_fairness(item, condition_weight)`
 
 **Purpose:** Scans the dataset for comparable listings (same category, at least one shared style tag) and estimates whether the item's price is a deal, fair, or overpriced relative to real comparables.
 
@@ -80,7 +187,7 @@ FitFindr uses six tools. All three required tools plus three supporting tools ar
 
 ---
 
-### `explain_style_gap(wardrobe)`
+#### `explain_style_gap(wardrobe)`
 
 **Purpose:** Analyzes the user's wardrobe and identifies what's missing — by category, versatility tags, and color variety — then produces a ready-made search query the agent can pass directly into `search_listings`.
 
@@ -94,7 +201,7 @@ FitFindr uses six tools. All three required tools plus three supporting tools ar
 
 ---
 
-## Planning Loop
+### Planning Loop
 
 The agent follows a conditional sequence — each tool's output determines whether the next tool runs, is skipped, or triggers a retry. The loop does not call all tools unconditionally.
 
@@ -123,7 +230,7 @@ The agent knows it's done when `create_fit_card` returns a result and the user h
 
 ---
 
-## State Management
+### State Management
 
 The agent maintains a single `session` dict that accumulates results as tools run. No tool ever re-asks the user for something a previous tool already returned.
 
@@ -147,16 +254,14 @@ session = {
 - `search_listings` writes its results list to `search_results`; the agent picks `results[0]` and writes it to `selected_item`
 - `estimate_price_fairness` reads `selected_item`; writes its full result dict to `price_verdict`
 - `score_listing` reads `selected_item`, `wardrobe`, `style_profile`, and `price_verdict`; writes its result to `score_result`
-- `suggest_outfit` reads `selected_item` and `wardrobe`; writes the outfit string list to `outfits`
+- `suggest_outfit` reads `selected_item` and `wardrobe`; writes the outfit string to `outfits`
 - `create_fit_card` reads `outfits[0]` and `selected_item`; writes the caption to `fit_card`
 
 The item returned by `search_listings` is the exact same dict passed into `suggest_outfit` and `create_fit_card` — the user never re-enters it. If a `"pass"` verdict is returned, the agent clears only `search_results`, `selected_item`, `price_verdict`, `score_result`, `outfits`, and `fit_card` and restarts from Step 2 with the rest of the session intact.
 
 ---
 
-## Error Handling
-
-### Per-tool failure modes
+### Error Handling
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
@@ -167,59 +272,9 @@ The item returned by `search_listings` is the exact same dict passed into `sugge
 | `estimate_price_fairness` | Fewer than 2 comparable items found | Returns `verdict: "not enough data"` with a plain-English explanation. Agent shows this honestly rather than omitting the price panel. |
 | `explain_style_gap` | Wardrobe is empty | Returns a default starter gap list with sensible starter recommendations. Agent uses `suggested_search` from the result to begin searching without asking the user anything. |
 
-### Concrete example from testing
-
-**Deliberately triggered failure — `create_fit_card` with empty outfit string:**
-
-```
-python -c "
-from tools import search_listings, create_fit_card
-results = search_listings('vintage graphic tee', size=None, max_price=50)
-print(create_fit_card('', results[0]))
-"
-```
-
-Output:
-```
-Couldn't generate a caption — no outfit suggestion was provided.
-```
-
-The guard `if not outfit or not outfit.strip(): return "..."` catches both empty strings and whitespace-only strings before the Groq API is ever called, so no network request is made and no exception propagates.
-
-**Deliberately triggered exception (before fix) — `create_fit_card` with `None`:**
-
-```
-python -c "
-from tools import search_listings, create_fit_card
-results = search_listings('vintage graphic tee', size=None, max_price=50)
-print(create_fit_card(None, results[0]))
-"
-```
-
-Output:
-```
-TypeError: create_fit_card requires a non-empty outfit string.
-```
-
-This was the failure documented in the demo. The fix was updating the guard to `if outfit is None or not outfit.strip()` so `None` is caught explicitly before `.strip()` is called.
-
-**No-results path from agent run:**
-
-```
-python -c "from tools import search_listings; print(search_listings('designer ballgown', size='XXS', max_price=5))"
-[]
-```
-
-The full agent run with this query produced:
-```
-No listings found for "designer ballgown" in size XXS under $5 — try broadening your size, price, or keywords.
-```
-
-The agent identified the specific constraint combination that caused the miss rather than returning a generic "no results" message.
-
 ---
 
-## Complete Interaction Walkthrough
+### Complete Interaction Walkthrough
 
 **User query:** `"I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers."`
 
@@ -237,30 +292,16 @@ At every step, the item dict flows forward through session state — the user ne
 
 ---
 
-## Spec Reflection
+### Build Notes: Spec vs. Implementation
 
-**One way the spec helped:** The explicit requirement that `search_listings` return an empty list rather than raise an exception on no results shaped the entire error handling architecture. Because the tool contract guaranteed a safe return value, the planning loop could check `if not results` cleanly rather than wrapping every tool call in try/except. That single constraint kept the agent code readable.
+**Where the spec paid off:** requiring `search_listings` to return an empty list rather than raise an exception on no results shaped the entire error-handling architecture. Because the tool contract guaranteed a safe return value, the planning loop could check `if not results` cleanly rather than wrapping every call in try/except.
 
-**One divergence and why:** The planning.md spec described `create_fit_card` returning a dict with `caption`, `tags`, and `title` fields. In practice, the Gradio UI needed a single string it could drop directly into a text panel — so the implementation was simplified to return just the caption string. Generating structured JSON from the LLM and immediately discarding the tags and title added latency and parsing complexity for no user-visible benefit. The spec was written before the UI was designed; once the output destination was clear, the simpler interface was the right call.
+**Where the implementation diverged:** the original spec described `create_fit_card` returning a dict with `caption`, `tags`, and `title` fields. In practice, the UI needed a single string it could drop directly into a text panel, so the implementation was simplified to return just the caption string — generating and immediately discarding structured JSON added latency and parsing complexity for no user-visible benefit.
 
----
-
-## AI Usage
-
-### Instance 1 — Implementing `search_listings`
-
-**What I gave the AI:** The Tool 1 spec from `planning.md` (inputs with types, return value description, failure mode), plus the relevant section of the architecture diagram showing that `search_listings` writes to `session["search_results"]` and that an empty result must not raise an exception.
-
-**What it produced:** A working implementation that filtered by size and price and returned a sorted list. It initially used substring matching on size (e.g. `"M" in "S/M"`) which caused decade strings like `"50s"` and `"1990s"` to match size `"S"`. It also set `min_score = 1` for all queries.
-
-**What I changed:** Added a full-word isolation requirement for bare size tokens using a regex boundary check, and raised `min_score` to 2 for multi-word queries to reduce noise results. Both changes were verified by running the three test queries from the AI Tool Plan before moving on.
+</details>
 
 ---
 
-### Instance 2 — Implementing the planning loop in `agent.py`
+### License
 
-**What I gave the AI:** The full architecture Mermaid diagram from `planning.md`, the state management section showing the session dict and what each tool reads and writes, and the error handling table. I asked it to implement `run_agent()` as a single function that orchestrates tool calls conditionally based on each tool's output.
-
-**What it produced:** A working planning loop that handled the happy path correctly. However, it called `suggest_outfit` unconditionally even when `score_listing` returned a `"pass"` verdict — the conditional branch was missing. It also did not populate `session["error"]` on the no-results path; it raised a Python exception instead.
-
-**What I changed:** Added the `if score_result["verdict"] == "pass": return session` early exit before `suggest_outfit` is called. Replaced the exception on empty results with `session["error"] = "No listings found..."` and a clean return, matching the error handling contract described in the spec. Both changes were tested against the no-results path and the pass-verdict path before wiring the agent into `app.py`.
+Built as a personal/portfolio project. Feel free to fork and adapt.
